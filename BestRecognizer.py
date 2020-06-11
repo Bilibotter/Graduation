@@ -1,3 +1,4 @@
+import cv2
 import dlib
 import keras
 import pickle
@@ -7,11 +8,21 @@ current_path = os.path.abspath(__file__)
 ABS_PATH_UTILS = os.path.dirname(current_path)
 
 
+def load_image(path, max_image_size=2000):
+    image = cv2.imread(path)
+    if max(image.shape) > max_image_size:
+        shape = image.shape
+        multiply = max(shape) / max_image_size
+        image = cv2.resize(image, (int(shape[1]/multiply), int(shape[0]/multiply)))
+    return image
+
+
 class BaseFaceRecognizer(object):
     def __init__(self, model):
         self.size = 256
         self.tolerance = 0.2
         self.threshold = 0.62
+        self.max_image_size = 2200
         if model == 'precise':
             from DSFD import DSFD_Detector
             self.face_detector = DSFD_Detector()
@@ -22,6 +33,13 @@ class BaseFaceRecognizer(object):
         self.landmarks_5_detector = dlib.shape_predictor(model_save_path)
         init_mask = FACERECOGNITION
         self.face_recognizer = SeetaFace(init_mask)
+
+    def image_pretreatment(self, image):
+        if max(image.shape) > self.max_image_size:
+            shape = image.shape
+            multiply = max(shape) / self.max_image_size
+            image = cv2.resize(image, (int(shape[1]/multiply), int(shape[0]/multiply)))
+        return image
 
     def verification(self, unknown_feature, features):
         max_error_times = len(features) * self.tolerance
@@ -34,6 +52,7 @@ class BaseFaceRecognizer(object):
         return True
 
     def get_similarity(self, img1, img2):
+        img1, img2 = self.image_pretreatment(img1), self.image_pretreatment(img2)
         feature1 = self.get_features(img1)[0]
         feature2 = self.get_features(img2)[0]
         return self.get_similarity_(feature1, feature2)
@@ -45,6 +64,7 @@ class BaseFaceRecognizer(object):
         return similarity
 
     def get_features(self, img):
+        img = self.image_pretreatment(img)
         crop_faces = self.get_crop_faces(img)
         return self.get_features_(crop_faces)
 
@@ -56,6 +76,7 @@ class BaseFaceRecognizer(object):
         return features
 
     def get_crop_faces(self, img):
+        img = self.image_pretreatment(img)
         boxes_set = self.get_boxes_set(img)
         return self.get_crop_faces_(img, boxes_set)
 
@@ -64,11 +85,12 @@ class BaseFaceRecognizer(object):
         for boxes in boxes_set:
             rect = dlib.rectangle(boxes[0], boxes[1], boxes[2], boxes[3])
             full_object_detection = self.landmarks_5_detector(img, rect)
-            crop_faces.append(dlib.get_face_chip(img, full_object_detection))
+            crop_faces.append(dlib.get_face_chip(img, full_object_detection, 256))
         return crop_faces
 
     def get_boxes_set(self, img):
-        return self.face_detector.get_boxes(img)
+        img = self.image_pretreatment(img)
+        return [list(map(int, boxes)) for boxes in self.face_detector.get_boxes(img)]
 
 
 class DataSets(object):
@@ -150,6 +172,55 @@ class OnlineRecognizer(object):
             infos.append((boxes, name, living_score))
         return infos
 
+    def write_in_dataset(self, write_num=5):
+        features = []
+        cap = cv2.VideoCapture(0)
+        font = cv2.FONT_HERSHEY_DUPLEX
+        has_writen_name = False
+        while cap.isOpened():
+            if not has_writen_name:
+                name = input('输入录入人姓名：')
+                has_writen_name = True
+            ret, image = cap.read()
+            if not ret:
+                break
+            boxes_set = self.recognizer.get_boxes_set(image)
+            if not boxes_set:
+                cv2.imshow('realtime', image)
+                cv2.waitKey(1)
+                continue
+            crop_faces = self.recognizer.get_crop_faces_(image, boxes_set)
+            feature = self.recognizer.get_features_(crop_faces)[0]
+            boxes = boxes_set[0]
+            cv2.rectangle(image, (boxes[0], boxes[1]), (boxes[2], boxes[3]),
+                          color=[255, 0, 255], thickness=2)
+            cv2.putText(image, 'enter space', ((boxes[0]) + 2, (boxes[1] - 6)),
+                        font, 1.0, [255, 0, 255], 1)
+            cv2.imshow('realtime', image)
+            k = cv2.waitKey(1)
+            # 空格录入
+            if k == ord(' '):
+                if len(features) >= write_num:
+                    features.pop(0)
+                features.append(feature)
+            # q键退出
+            elif k == ord('q'):
+                if features:
+                    save_path = os.path.join(self.dataset.save_path, f'{name}.pkl')
+                    with open(save_path, 'wb')as f:
+                        pickle.dump(features, f)
+                cap.release()
+                cv2.destroyAllWindows()
+            # s键换下一个人
+            elif k == ord('s'):
+                self.dataset.name_2_features[name] = features
+                save_path = os.path.join(self.dataset.save_path, f'{name}.pkl')
+                with open(save_path, 'wb')as f:
+                    pickle.dump(features, f)
+                features = []
+                has_writen_name = False
+                cv2.destroyAllWindows()
+
 
 class OfflineRecognizer(object):
     def __init__(self):
@@ -204,16 +275,16 @@ def real_time_test(online_recognizer):
             cv2.imwrite('realtimes.jpg', image)
 
 
-def offline_test():
+def offline_test(path):
     import cv2
-    photo = cv2.imread('F:/classmates.jpg')
+    photo = cv2.imread(path)
     offline_recognizer = OfflineRecognizer()
     features = offline_recognizer.recognizer.get_features(photo)
     for i, feature in enumerate(features):
         offline_recognizer.dataset.name_2_features[i] = [feature]
     present_students, absent_students = offline_recognizer.get_present_and_absent(photo)
-    print('present students', present_students)
-    print('absent students', absent_students)
+    # print('present students', present_students)
+    # print('absent students', absent_students)
     for name1 in offline_recognizer.dataset.name_2_features:
         for name2 in offline_recognizer.dataset.name_2_features:
             f1 = offline_recognizer.dataset.name_2_features[name1][0]
@@ -224,6 +295,10 @@ def offline_test():
 
 
 if __name__ == '__main__':
-    offline_test()
+    path = 'F:/classmates.jpg'
+    offline_test(path)
     online_recognizer = OnlineRecognizer()
     real_time_test(online_recognizer)
+    online_recognizer.write_in_dataset()
+    real_time_test(online_recognizer)
+    # online_recognizer.dataset.name_2_features
